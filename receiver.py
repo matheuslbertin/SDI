@@ -2,81 +2,96 @@ import socket
 import struct
 import threading
 import queue
-from datetime import datetime
+import time
 import os
+from datetime import datetime
+from collections import Counter
 
-# Configurações
-MULTICAST_GROUP = '224.1.1.1'
+# Configurações de Rede
+MULTICAST_GROUP = '224.1.1.1' # Alterado para evitar faixas reservadas do sistema
 PORT = 5007
+INTERVALO_CALCULO = 60 # Janela de 60 segundos do seu código original
 
-# Fila para comunicação entre as threads
 data_queue = queue.Queue()
+mapa_suspeitos = {}
+mapa_lock = threading.Lock()
 
 def listener_thread():
-    """Thread 1: Responsável apenas por capturar os pacotes da rede"""
+    """Thread 1: Captura bruta de pacotes"""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    
+    # No Mac, bind vazio '' ou '0.0.0.0' é o mais estável
     sock.bind(('', PORT))
 
+    # Correção do struct: '4sL' é mais estável no macOS que '4sl'
     mreq = struct.pack('4sL', socket.inet_aton(MULTICAST_GROUP), socket.INADDR_ANY)
     sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
     
-    # Timeout para não travar a thread eternamente se ninguém enviar nada
-    sock.settimeout(1.0)
-
     while True:
         try:
             data, address = sock.recvfrom(1024)
-            arrival_time = datetime.now()
-            # Coloca o dado, o IP e o horário de chegada na fila
-            data_queue.put((data, address[0], arrival_time))
-        except socket.timeout:
-            continue
+            # Coloca (conteúdo, ip_origem) na fila
+            data_queue.put((data.decode('utf-8', errors='ignore'), address[0]))
+        except Exception as e:
+            print(f"Erro no listener: {e}")
 
 def processor_thread():
-    """Thread 2: Responsável por calcular métricas e imprimir no terminal"""
-    last_arrival = None
-    acertos = 0
-    falhas = 0
-    
-    # Limpa o terminal do Mac no início
+    """Thread 2: Cálculo de frequência e retransmissão"""
+    # Cria o socket de envio FORA do loop para evitar o Erro 56
+    sock_sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    sock_sender.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
+
     os.system('clear')
-    print(f"{'Data/Hora':^15} | {'IP Origem':^15} | {'Delta':^8} | {'Razão F/A':^8}")
-    print("-" * 65)
+    print(f"Monitorando grupo {MULTICAST_GROUP}...")
 
     while True:
-        try:
-            # Tenta pegar um item da fila com timeout de 6s (nossa detecção de falha)
-            data, ip, now = data_queue.get(timeout=6.0)
-            acertos += 1
-            
-            delta_str = "N/A"
-            if last_arrival:
-                delta = (now - last_arrival).total_seconds()
-                delta_str = f"{delta:.2f}s"
-            
-            last_arrival = now
-            razao = falhas / acertos if acertos > 0 else 0
-            
-            # Impressão formatada com o IP solicitado
-            print(f"{now.strftime('%H:%M:%S'):^15} | {ip:^15} | {delta_str:^8} | {razao:^10.2f}")
-            
-        except queue.Empty:
-            # Se a fila ficar vazia por mais de 6s, contamos como falha
-            falhas += 1
-            print(f"{datetime.now().strftime('%H:%M:%S')} | !!! FALHA DETECTADA (TIMEOUT) !!!")
+        dados_da_janela = []
+        # Define o fim da janela de 60 segundos
+        tempo_limite = time.time() + INTERVALO_CALCULO
+        
+        while time.time() < tempo_limite:
+            try:
+                # Coleta dados da fila com timeout curto para não travar o loop de tempo
+                item = data_queue.get(timeout=1)
+                dados_da_janela.append(item)
+            except queue.Empty:
+                continue
 
-# Inicia as threads
-t1 = threading.Thread(target=listener_thread, daemon=True)
-t2 = threading.Thread(target=processor_thread, daemon=True)
+        if dados_da_janela:
+            # Extrai apenas os IPs para contar a frequência
+            ips = [reg[1] for reg in dados_da_janela]
+            contagem = Counter(ips)
 
-t1.start()
-t2.start()
+            with mapa_lock:
+                for ip, freq in contagem.items():
+                    # Lógica de suspeito: frequência / tempo da janela (60s)
+                    valor_suspeito = freq / INTERVALO_CALCULO
+                    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    
+                    if ip not in mapa_suspeitos:
+                        mapa_suspeitos[ip] = []
+                    
+                    mapa_suspeitos[ip].append([ts, valor_suspeito])
+                    
+                    # Retransmissão do cálculo para a rede
+                    msg_out = f"{ts}, {ip}, {INTERVALO_CALCULO}, {valor_suspeito:.4f}"
+                    sock_sender.sendto(msg_out.encode('utf-8'), (MULTICAST_GROUP, PORT))
+                    
+                    print(f"[{ts}] IP: {ip} | Freq: {freq} | Suspeito: {valor_suspeito:.4f}")
+        
+        dados_da_janela.clear()
 
-# Mantém o programa principal vivo
-try:
-    while True:
-        import time
-        time.sleep(1)
-except KeyboardInterrupt:
-    print("\nEncerrando receptor...")
+# Inicialização
+if __name__ == "__main__":
+    t1 = threading.Thread(target=listener_thread, daemon=True)
+    t2 = threading.Thread(target=processor_thread, daemon=True)
+    
+    t1.start()
+    t2.start()
+
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\nEncerrando...")
