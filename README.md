@@ -1,7 +1,10 @@
+Alunos: Matheus Bertin, Kaua Hopfer.
+
+
 # 🛰️ Multicast Failure Detector (Python)
 
 Este projeto implementa um **Detector de Falhas de Omissão** utilizando o protocolo **IP Multicast**. O sistema é composto por um Emissor (Sender) que transmite batimentos cardíacos (*heartbeats*) e um Receptor (Receiver) multi-thread que analisa a frequência dessas mensagens para determinar a integridade dos nós na rede.
-Alunos: Matheus Bertin, Kaua Hopfer.
+
 
 ## 📌 Funcionalidades
 * **Comunicação Multicast UDP**: Transmissão eficiente de dados para múltiplos receptores simultâneos.
